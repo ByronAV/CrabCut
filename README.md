@@ -11,7 +11,6 @@
 - Click analytics for tracking most popular URLs
 - High throughput and low latency redirections
 - Permanent storage of shortened links
-- API key-based rate limiting and access control
 - Intelligent in-memory caching for popular links
 
 ---
@@ -33,7 +32,6 @@
 - Low-latency redirection (sub-millisecond goal)
 - Horizontally scalable backend and cache layers
 - Designed for read-heavy workloads (200:1 read/write ratio)
-- API-first design for future third-party integrations
 
 ---
 
@@ -73,15 +71,14 @@
 **Endpoint:**
 
 ```bash
-POST /api/create
+POST /create
 ```
 
 **Request Body:**
 ```json
 {
-  "url": "https://very-long-url.com/page",
-  "api_key": "your-api-key",
-  "custom_url": "optional-custom-alias"
+  "long_url": "https://very-long-url.com/page",
+  "custom_url?": "optional-custom-alias"
 }
 ```
 
