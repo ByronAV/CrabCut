@@ -1,12 +1,12 @@
-use std::{env, sync::OnceLock};
-use actix_web::{App, HttpServer};
+use std::{io, env, sync::OnceLock};
+use actix_web::{web, App, HttpServer};
+use sqlx::{postgres::PgPoolOptions};
 
 mod url;
-mod user;
-mod password;
 
 // We're retrieving the necessary env vars before beginning the service
 static PORT: OnceLock<u16> = OnceLock::new();
+static DATABASE_URL: OnceLock<String> = OnceLock::new();
 
 fn get_port() -> u16 {
     *PORT.get_or_init(|| {
@@ -17,11 +17,34 @@ fn get_port() -> u16 {
     })
 }
 
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn get_db_url() -> &'static str {
+    DATABASE_URL.get_or_init(|| {
+        env::var("DATABASE_URL")
+            .expect("Please specify the server for the PostgreSQL Database microservice in variable DATABASE_URL.")
+    }).as_str()
+}
+
+#[tokio::main(flavor="current_thread")]
+async fn main() -> io::Result<()> {
     println!("Backend server is starting...");
 
-    HttpServer::new(|| {
+    let db_url = get_db_url();
+    println!("Connecting to database at: {}", db_url);
+
+    // Create a connection pool to the database
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(db_url)
+        .await
+        .expect("Failed to create Postgres pool");
+
+    // Wrap the pool in web::Data and move it into the App
+    let pool = web::Data::new(pool);
+
+
+    HttpServer::new(move || {
         App::new()
+            .app_data(pool.clone())
             .service(url::create_short_url)
             .service(url::get_short_url)
     })

@@ -1,5 +1,5 @@
 
-use actix_web::{get, post, Responder, HttpResponse, web::Json, FromRequest};
+use actix_web::{web, get, post, Responder, HttpResponse, web::Json};
 use serde::Deserialize;
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -18,7 +18,7 @@ pub async fn health_check() -> impl Responder {
 }
 
 #[post("/create")]
-pub async fn create_short_url(req: Json<ShortenRequest>) -> impl Responder {
+pub async fn create_short_url(req: Json<ShortenRequest>, db: web::Data<PgPool>) -> impl Responder {
 
     let alias = req.custom_alias.as_deref().unwrap_or("");
     let long_url = req.long_url.trim();
@@ -31,9 +31,9 @@ pub async fn create_short_url(req: Json<ShortenRequest>) -> impl Responder {
         let short_url = hash_long_url(long_url);
         // Here we have a new short URL. We are going to store this
         // in the database for future reference.
-
+        save_short_url_to_db(&db, long_url, &short_url);
         return HttpResponse::Ok().json(serde_json::json!({
-            "short_url": format!("https://crabcut.io/{}", short_url)
+            "short_url": format!("https://crabcut.io/{}", short_url)    
         }));
     } else {
         // We have an alias, we will use it
@@ -41,7 +41,11 @@ pub async fn create_short_url(req: Json<ShortenRequest>) -> impl Responder {
             return HttpResponse::BadRequest().body("Invalid alias");
         }
         // Check if the alias is unique
-        if !is_alias_unique(alias) {
+        if !is_alias_unique(&db, alias).await.unwrap_or_else(|_| {
+            // If we cannot check the alias, we return a server error
+            eprintln!("Error checking alias uniqueness");
+            false
+        }) {
             return HttpResponse::Conflict().body("Alias already exists");
         }
         // If the alias is valid and unique, we can create the short URL
@@ -81,20 +85,42 @@ fn hash_long_url(long_url: &str) -> String {
     return short_url.to_string();
 }
 
-fn is_alias_unique(alias: &str) -> bool {
-    // Check the postgres database to see if the alias is unique
-    // For now, we will just return true
-    true
+async fn is_alias_unique(db_pool: &PgPool, alias: &str) -> Result<bool, sqlx::Error> {
+    // Check in database if the alias is unique
+    let record = sqlx::query!(
+        r#"
+        SELECT 1 as exists_flag FROM urls
+        WHERE short_url = $1
+        LIMIT 1
+        "#,
+        alias
+    )
+    .fetch_optional(db_pool)
+    .await?;
+
+    Ok(record.is_none())
 }
 
-async fn save_short_url_to_db(db_pool: &PgPool, long_url: &str, short_url: &str, user_id: Option<uuid::Uuid>) -> Result<(), String> {
-    return sqlx::query!(
-        r#"
-        INSERT INTO urls (long_url, short_url)
-        VALUES ($1, $2)
-        ON CONFLICT (short_url) DO NOTHING
-        "#,
-        long_url, short_url
-    )
-    .execute(db_pool)
+fn save_short_url_to_db(db_pool: &PgPool, long_url: &str, short_url: &str) {
+    let long_url = long_url.to_string();
+    let short_url = short_url.to_string();
+    let db_pool = db_pool.clone(); // `PgPool` is `Clone`
+
+    println!("Adding URL to database: long_url = {}, short_url = {}", long_url, short_url);
+    tokio::spawn(async move {
+        if let Err(e) = sqlx::query!(
+            r#"
+            INSERT INTO urls (long_url, short_url)
+            VALUES ($1, $2)
+            ON CONFLICT (short_url) DO NOTHING
+            "#,
+            long_url,
+            short_url
+        )
+        .execute(&db_pool)
+        .await
+        {
+            eprintln!("Failed to insert URL: {:?}", e); // Log or handle error
+        }
+    });
 }
