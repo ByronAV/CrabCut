@@ -7,6 +7,7 @@ mod url;
 // We're retrieving the necessary env vars before beginning the service
 static PORT: OnceLock<u16> = OnceLock::new();
 static DATABASE_URL: OnceLock<String> = OnceLock::new();
+static REDIS_URL: OnceLock<String> = OnceLock::new();
 
 fn get_port() -> u16 {
     *PORT.get_or_init(|| {
@@ -21,6 +22,13 @@ fn get_db_url() -> &'static str {
     DATABASE_URL.get_or_init(|| {
         env::var("DATABASE_URL")
             .expect("Please specify the server for the PostgreSQL Database microservice in variable DATABASE_URL.")
+    }).as_str()
+}
+
+fn get_redis_url() -> &'static str {
+    REDIS_URL.get_or_init(|| {
+        env::var("REDIS_URL")
+            .expect("Please specify the server for the Redis microservice in variable REDIS_URL.")
     }).as_str()
 }
 
@@ -41,9 +49,20 @@ async fn main() -> io::Result<()> {
     // Wrap the pool in web::Data and move it into the App
     let pool = web::Data::new(pool);
 
+    println!("Connected to database successfully");
+    println!("Connecting to Redis at: {}", get_redis_url());
+    
+    // Create the redis client
+    let redis_client = redis::Client::open(get_redis_url()
+        .to_string()  // Convert the static str to String
+    ).expect("Failed to create Redis client");
+
+    let redis_client = web::Data::new(redis_client);
+    println!("Connected to Redis successfully");
 
     HttpServer::new(move || {
         App::new()
+            .app_data(redis_client.clone())
             .app_data(pool.clone())
             .service(url::create_short_url)
             .service(url::get_short_url)

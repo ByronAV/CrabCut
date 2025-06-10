@@ -5,6 +5,7 @@ use serde_json;
 use sha2::{Digest, Sha256};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use sqlx::PgPool;
+use redis::AsyncCommands;
 
 #[derive(Deserialize)]
 struct ShortenRequest {
@@ -56,8 +57,99 @@ pub async fn create_short_url(req: Json<ShortenRequest>, db: web::Data<PgPool>) 
 }
 
 #[get("/{short_url}")]
-pub async fn get_short_url() -> impl Responder {
-    HttpResponse::Ok().body("OK")
+pub async fn get_short_url(
+    path: web::Path<String>,
+    redis_client: web::Data<redis::Client>,
+    pg_pool: web::Data<PgPool>,
+) -> impl Responder {
+
+    // First we are going to check if short url is in cache
+    // If it is, we will return the long url
+    // If it is not, we will check the database
+    let short_url = path.into_inner();
+    let mut redis_conn = match redis_client.get_multiplexed_async_connection().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("Failed to connect to Redis: {:?}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    // Check redis cache first
+    let cached_url: Option<String> = match redis_conn.get(&short_url).await {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("Failed to get from Redis: {:?}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    if let Some(long_url) = cached_url {
+        // Cache hit!!!, return it
+        let short_url_clone = short_url.clone();
+        let long_url_clone = long_url.clone();
+        let pool_clone = pg_pool.clone();
+        let mut redis_conn_clone = redis_conn.clone();
+        tokio::spawn(async move {
+            let _ = sqlx::query!(
+                r#"
+                UPDATE urls SET click_count = click_count + 1
+                WHERE short_url = $1
+                "#,
+                short_url_clone
+            )
+            .execute(pool_clone.get_ref())
+            .await;
+
+            let _ : Result<(), _> = redis_conn_clone.set_ex(&short_url_clone, &long_url_clone, 3600).await;
+        });
+        return HttpResponse::Found()
+            .append_header(("Location", long_url))
+            .finish();
+    }
+
+    // Otherwise cache miss :(
+    let result = sqlx::query!(
+        r#"
+        SELECT long_url FROM urls
+        WHERE short_url = $1
+        LIMIT 1
+        "#,
+        short_url
+    )
+    .fetch_one(pg_pool.get_ref())
+    .await;
+
+    let long_url = match result {
+        Ok(record) => record.long_url,
+        Err(sqlx::Error::RowNotFound) => {
+            // If the record is not found, we return a 404
+            return HttpResponse::NotFound().body("Short URL not found");
+        }
+        Err(e) => {
+            eprintln!("Database error: {:?}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    let short_url_clone = short_url.clone();
+    let long_url_clone = long_url.clone();
+    let pool_clone = pg_pool.clone();
+    let mut redis_conn_clone = redis_conn.clone();
+    tokio::spawn(async move {
+        let _ = sqlx::query!(
+            "UPDATE urls SET click_count = click_count + 1 WHERE short_url = $1",
+            short_url_clone
+        )
+        .execute(pool_clone.get_ref())
+        .await;
+
+        let _ : Result<(), _> = redis_conn_clone.set_ex(&short_url_clone, &long_url_clone, 3600).await;
+    });
+
+    HttpResponse::Found()
+        .append_header(("Location", long_url))
+        .finish()
 }
 
 fn validate_alias(alias: &str) -> bool {
