@@ -30,7 +30,41 @@ services:
     container_name: redis_cache
     ports:
       - "6379:6379"
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
   
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
+
+  analytics:
+    image: analytics
+    build:
+      context: ./analytics
+      dockerfile: ./Dockerfile-dev
+    container_name: analytics
+    environment:
+      DATABASE_URL: postgres://user:password@db:5432/urls-db
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: click-events
+    ports:
+      - "8001:5000"
+    depends_on:
+      - db
+      - kafka
+
   backend:
     image: backend
     build: 
@@ -40,6 +74,7 @@ services:
     environment:
       DATABASE_URL: postgres://user:password@db:5432/urls-db
       REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
       PORT: "80"
     ports:
       - "8000:80"
@@ -48,6 +83,7 @@ services:
     depends_on:
       - db
       - redis
+      - kafka
 
 volumes:
   db_data:
